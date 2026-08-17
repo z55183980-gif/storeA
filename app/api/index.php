@@ -21,6 +21,9 @@ try {
     $columns=$db->query('PRAGMA table_info(products)')->fetchAll(PDO::FETCH_COLUMN,1);
     if (!in_array('original_price',$columns,true)) $db->exec('ALTER TABLE products ADD COLUMN original_price NUMERIC NULL');
     if (!in_array('sales',$columns,true)) $db->exec('ALTER TABLE products ADD COLUMN sales INTEGER NOT NULL DEFAULT 0');
+    $db->exec("CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, description TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)");
+    if ((int)$db->query('SELECT COUNT(*) FROM categories')->fetchColumn()===0) $db->exec("INSERT INTO categories(name,description,sort_order) VALUES ('数码科技','电脑、办公与智能设备',1),('生活好物','提升日常生活品质的精选好物',2),('办公优选','通勤与办公场景实用装备',3),('潮流配件','兼顾颜值与实用性的时尚配件',4)");
+    if (!in_array('category_id',$columns,true)) { $db->exec('ALTER TABLE products ADD COLUMN category_id INTEGER NULL');$db->exec('UPDATE products SET category_id=((id-1)%4)+1 WHERE category_id IS NULL'); }
     $orderColumns=$db->query('PRAGMA table_info(orders)')->fetchAll(PDO::FETCH_COLUMN,1);
     if (!in_array('payment_method_id',$orderColumns,true)) $db->exec('ALTER TABLE orders ADD COLUMN payment_method_id INTEGER NULL');
     if (!in_array('payment_code',$orderColumns,true)) $db->exec('ALTER TABLE orders ADD COLUMN payment_code TEXT NULL');
@@ -135,8 +138,9 @@ try {
     if ($method === 'GET' && $route === 'health') respond(['status'=>'ok', 'database'=>'sqlite']);
 
     if ($method === 'GET' && $route === 'products') {
-        respond($db->query("SELECT id,name,description,price,original_price,stock,sales,image_url,status,sort_order FROM products WHERE status='on_sale' ORDER BY sort_order,id")->fetchAll());
+        $category=(int)($_GET['category_id']??0);$sql="SELECT p.*,c.name AS category_name FROM products p LEFT JOIN categories c ON c.id=p.category_id WHERE p.status='on_sale'";if($category>0)$sql.=' AND p.category_id='.$category;respond($db->query($sql.' ORDER BY p.sort_order,p.id')->fetchAll());
     }
+    if ($method === 'GET' && $route === 'categories') respond($db->query("SELECT c.*,COUNT(p.id) AS product_count FROM categories c LEFT JOIN products p ON p.category_id=c.id AND p.status='on_sale' GROUP BY c.id ORDER BY c.sort_order,c.id")->fetchAll());
     if ($method === 'GET' && $route === 'payment-methods') {
         respond(array_map('paymentMethodPublicRow',$db->query('SELECT * FROM payment_methods WHERE state=1 ORDER BY listorder,id')->fetchAll()));
     }
@@ -227,7 +231,10 @@ try {
         respond(['products'=>(int)$db->query("SELECT COUNT(*) FROM products WHERE status='on_sale'")->fetchColumn(),'orders'=>(int)$db->query('SELECT COUNT(*) FROM orders')->fetchColumn(),'revenue'=>(float)$db->query("SELECT COALESCE(SUM(total_amount),0) FROM orders WHERE status NOT IN ('cancelled','refunded')")->fetchColumn(),'users'=>(int)$db->query('SELECT COUNT(*) FROM users')->fetchColumn(),'pending'=>(int)$db->query("SELECT COUNT(*) FROM orders WHERE status='pending'")->fetchColumn()]);
     }
     if ($method==='GET' && $route==='admin/users') respond($db->query('SELECT id,username,status,created_at FROM users ORDER BY id DESC')->fetchAll());
-    if ($method==='GET' && $route==='admin/categories') respond([['name'=>'全部商品','product_count'=>(int)$db->query('SELECT COUNT(*) FROM products')->fetchColumn()],['name'=>'在售商品','product_count'=>(int)$db->query("SELECT COUNT(*) FROM products WHERE status='on_sale'")->fetchColumn()],['name'=>'下架商品','product_count'=>(int)$db->query("SELECT COUNT(*) FROM products WHERE status='off_sale'")->fetchColumn()]]);
+    if ($method==='GET' && $route==='admin/categories') respond($db->query("SELECT c.*,COUNT(p.id) AS product_count FROM categories c LEFT JOIN products p ON p.category_id=c.id GROUP BY c.id ORDER BY c.sort_order,c.id")->fetchAll());
+    if ($method==='POST' && $route==='admin/categories') { $stmt=$db->prepare('INSERT INTO categories(name,description,sort_order) VALUES(?,?,?)');$stmt->execute([requireText($data,'name',1,80),mb_substr((string)($data['description']??''),0,300),(int)($data['sort_order']??0)]);respond(['id'=>(int)$db->lastInsertId()],201); }
+    if ($method==='POST' && preg_match('#^admin/categories/(\d+)/save$#',$route,$match)) { $stmt=$db->prepare('UPDATE categories SET name=?,description=?,sort_order=?,updated_at=CURRENT_TIMESTAMP WHERE id=?');$stmt->execute([requireText($data,'name',1,80),mb_substr((string)($data['description']??''),0,300),(int)($data['sort_order']??0),(int)$match[1]]);respond(['ok'=>true]); }
+    if ($method==='POST' && preg_match('#^admin/categories/(\d+)/delete$#',$route,$match)) { $db->prepare('UPDATE products SET category_id=NULL WHERE category_id=?')->execute([(int)$match[1]]);$stmt=$db->prepare('DELETE FROM categories WHERE id=?');$stmt->execute([(int)$match[1]]);respond(['ok'=>true]); }
     if ($method==='GET' && $route==='admin/payment-methods') respond(array_map('paymentMethodRow',$db->query('SELECT * FROM payment_methods ORDER BY listorder,id')->fetchAll()));
     if ($method==='POST' && $route==='admin/payment-methods/upload') {
         if (!isset($_FILES['image']) || $_FILES['image']['error'] !== UPLOAD_ERR_OK) respond(['error'=>'二维码上传失败'],422);
@@ -259,10 +266,10 @@ try {
     }
     if ($method==='POST' && $route==='admin/products') {
         $name=requireText($data,'name',1,120);$price=(float)($data['price']??-1);$original=($data['original_price']??'')===''?null:(float)$data['original_price'];$stock=(int)($data['stock']??0);$sales=(int)($data['sales']??0);if($price<0||($original!==null&&$original<0)||$stock<0||$sales<0)respond(['error'=>'price_stock_or_sales_invalid'],422);
-        $stmt=$db->prepare('INSERT INTO products(name,description,price,original_price,stock,sales,image_url,status,sort_order) VALUES(?,?,?,?,?,?,?,?,?)');$stmt->execute([$name,mb_substr((string)($data['description']??''),0,5000),$price,$original,$stock,$sales,(string)($data['image_url']??''),($data['status']??'on_sale')==='off_sale'?'off_sale':'on_sale',(int)($data['sort_order']??0)]);respond(['id'=>(int)$db->lastInsertId()],201);
+        $stmt=$db->prepare('INSERT INTO products(name,description,price,original_price,stock,sales,image_url,status,sort_order,category_id) VALUES(?,?,?,?,?,?,?,?,?,?)');$stmt->execute([$name,mb_substr((string)($data['description']??''),0,5000),$price,$original,$stock,$sales,(string)($data['image_url']??''),($data['status']??'on_sale')==='off_sale'?'off_sale':'on_sale',(int)($data['sort_order']??0),(int)($data['category_id']??0)?:null]);respond(['id'=>(int)$db->lastInsertId()],201);
     }
     if (($method==='PUT' && preg_match('#^admin/products/(\d+)$#',$route,$match)) || ($method==='POST' && preg_match('#^admin/products/(\d+)/save$#',$route,$match))) {
-        $original=($data['original_price']??'')===''?null:(float)$data['original_price'];if($original!==null&&$original<0)respond(['error'=>'original_price_invalid'],422);$stmt=$db->prepare('UPDATE products SET name=?,description=?,price=?,original_price=?,stock=?,sales=?,image_url=?,status=?,sort_order=?,updated_at=CURRENT_TIMESTAMP WHERE id=?');$stmt->execute([requireText($data,'name',1,120),mb_substr((string)($data['description']??''),0,5000),(float)($data['price']??0),$original,max(0,(int)($data['stock']??0)),max(0,(int)($data['sales']??0)),(string)($data['image_url']??''),($data['status']??'on_sale')==='off_sale'?'off_sale':'on_sale',(int)($data['sort_order']??0),(int)$match[1]]);respond(['ok'=>true]);
+        $original=($data['original_price']??'')===''?null:(float)$data['original_price'];if($original!==null&&$original<0)respond(['error'=>'original_price_invalid'],422);$stmt=$db->prepare('UPDATE products SET name=?,description=?,price=?,original_price=?,stock=?,sales=?,image_url=?,status=?,sort_order=?,category_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?');$stmt->execute([requireText($data,'name',1,120),mb_substr((string)($data['description']??''),0,5000),(float)($data['price']??0),$original,max(0,(int)($data['stock']??0)),max(0,(int)($data['sales']??0)),(string)($data['image_url']??''),($data['status']??'on_sale')==='off_sale'?'off_sale':'on_sale',(int)($data['sort_order']??0),(int)($data['category_id']??0)?:null,(int)$match[1]]);respond(['ok'=>true]);
     }
     if (($method==='DELETE' && preg_match('#^admin/products/(\d+)$#',$route,$match)) || ($method==='POST' && preg_match('#^admin/products/(\d+)/delete$#',$route,$match))) { $stmt=$db->prepare('DELETE FROM products WHERE id=?'); $stmt->execute([(int)$match[1]]); respond(['ok'=>true]); }
     if ($method==='GET' && $route==='admin/orders') respond($db->query('SELECT * FROM orders ORDER BY id DESC')->fetchAll());
