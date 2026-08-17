@@ -12,6 +12,10 @@
 database/*.sqlite
 database/*.sqlite-*
 *.log
+deploy-storeA.tar.gz
+public-assets.tar.gz
+web-dist-storeA.tar.gz
+admin-dist-storeA.tar.gz
 
 # Frontend build output
 app/web/dist/

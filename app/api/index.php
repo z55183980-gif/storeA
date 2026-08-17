@@ -21,8 +21,21 @@ try {
     $columns=$db->query('PRAGMA table_info(products)')->fetchAll(PDO::FETCH_COLUMN,1);
     if (!in_array('original_price',$columns,true)) $db->exec('ALTER TABLE products ADD COLUMN original_price NUMERIC NULL');
     if (!in_array('sales',$columns,true)) $db->exec('ALTER TABLE products ADD COLUMN sales INTEGER NOT NULL DEFAULT 0');
+    $orderColumns=$db->query('PRAGMA table_info(orders)')->fetchAll(PDO::FETCH_COLUMN,1);
+    if (!in_array('payment_method_id',$orderColumns,true)) $db->exec('ALTER TABLE orders ADD COLUMN payment_method_id INTEGER NULL');
+    if (!in_array('payment_code',$orderColumns,true)) $db->exec('ALTER TABLE orders ADD COLUMN payment_code TEXT NULL');
+    if (!in_array('payment_name',$orderColumns,true)) $db->exec('ALTER TABLE orders ADD COLUMN payment_name TEXT NULL');
+    if (!in_array('payment_snapshot',$orderColumns,true)) $db->exec('ALTER TABLE orders ADD COLUMN payment_snapshot TEXT NULL');
+    $paymentStatusAdded=!in_array('payment_status',$orderColumns,true); if ($paymentStatusAdded) $db->exec("ALTER TABLE orders ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'unpaid' CHECK(payment_status IN ('unpaid','submitted','confirmed','failed'))");
+    if (!in_array('payment_reference',$orderColumns,true)) $db->exec('ALTER TABLE orders ADD COLUMN payment_reference TEXT NULL');
+    if (!in_array('payment_submitted_at',$orderColumns,true)) $db->exec('ALTER TABLE orders ADD COLUMN payment_submitted_at TEXT NULL');
+    if (!in_array('shipping_address',$orderColumns,true)) $db->exec('ALTER TABLE orders ADD COLUMN shipping_address TEXT NULL');
+    if ($paymentStatusAdded) $db->exec("UPDATE orders SET payment_status='confirmed' WHERE payment_status='unpaid' AND status IN ('paid','delivering','completed')");
     $chatColumns=$db->query('PRAGMA table_info(chat_sessions)')->fetchAll(PDO::FETCH_COLUMN,1);
     if (!in_array('admin_last_read_message_id',$chatColumns,true)) $db->exec('ALTER TABLE chat_sessions ADD COLUMN admin_last_read_message_id INTEGER NOT NULL DEFAULT 0');
+    // 修正历史会话显示名：注册用户显示账号，游客会话补充可区分的唯一 ID。
+    $db->exec("UPDATE chat_sessions SET visitor_name=(SELECT username FROM users WHERE users.id=chat_sessions.user_id) WHERE user_id IS NOT NULL AND EXISTS (SELECT 1 FROM users WHERE users.id=chat_sessions.user_id)");
+    $db->exec("UPDATE chat_sessions SET visitor_name='游客-' || printf('%06d', id) WHERE user_id IS NULL AND (visitor_name IS NULL OR visitor_name='' OR visitor_name='游客' OR visitor_name='会员用户')");
 } catch (Throwable) {
     respond(['error' => 'database_unavailable'], 500);
 }
@@ -109,6 +122,10 @@ function paymentMethodRow(array $row): array {
     $row['id']=(int)$row['id'];$row['minmoney']=(float)$row['minmoney'];$row['maxmoney']=(float)$row['maxmoney'];$row['isonline']=(int)$row['isonline'];$row['state']=(int)$row['state'];$row['listorder']=(int)$row['listorder'];
     $configs=json_decode((string)$row['configs'],true);$row['configs_data']=is_array($configs)?$configs:[];unset($row['configs']);return $row;
 }
+function paymentMethodPublicRow(array $row): array {
+    $row=paymentMethodRow($row);
+    return ['id'=>$row['id'],'paytype'=>$row['paytype'],'paytypetitle'=>$row['paytypetitle'],'ftitle'=>$row['ftitle'],'minmoney'=>$row['minmoney'],'maxmoney'=>$row['maxmoney'],'isonline'=>$row['isonline'],'remark'=>$row['remark'],'configs_data'=>$row['configs_data']];
+}
 
 $method = $_SERVER['REQUEST_METHOD'];
 $route = trim((string)($_GET['route'] ?? ''), '/');
@@ -119,6 +136,9 @@ try {
 
     if ($method === 'GET' && $route === 'products') {
         respond($db->query("SELECT id,name,description,price,original_price,stock,sales,image_url,status,sort_order FROM products WHERE status='on_sale' ORDER BY sort_order,id")->fetchAll());
+    }
+    if ($method === 'GET' && $route === 'payment-methods') {
+        respond(array_map('paymentMethodPublicRow',$db->query('SELECT * FROM payment_methods WHERE state=1 ORDER BY listorder,id')->fetchAll()));
     }
 
     if ($method === 'GET' && $route === 'auth/captcha') {
@@ -131,6 +151,7 @@ try {
     }
     if ($method === 'POST' && $route === 'auth/register') {
         $username = requireText($data, 'username', 3, 64); $password = requireText($data, 'password', 6, 128);
+        if ((string)($data['confirm_password'] ?? '') !== $password) respond(['error'=>'两次输入的密码不一致'], 422);
         verifyCaptcha($db, $data, $config['jwt_secret']);
         $exists = $db->prepare('SELECT 1 FROM users WHERE username=?'); $exists->execute([$username]);
         if ($exists->fetchColumn()) respond(['error'=>'用户名已存在'], 409);
@@ -149,21 +170,49 @@ try {
         respond(['token'=>issueToken('admin',(int)$admin['id'],$config['jwt_secret']),'username'=>$admin['username']]);
     }
 
+    if ($method === 'POST' && $route === 'orders/claim-guest') {
+        $actor = requireRole('user', $config['jwt_secret']);
+        $tokens = $data['guest_tokens'] ?? [];
+        if (!is_array($tokens)) respond(['error'=>'guest_tokens_invalid'], 422);
+        $tokens = array_values(array_unique(array_filter(array_map(static fn($token) => trim((string)$token), $tokens), static fn($token) => preg_match('/^[a-f0-9]{48}$/i', $token) === 1)));
+        if (count($tokens) > 100) respond(['error'=>'guest_tokens_invalid'], 422);
+        $claimed = 0;
+        if ($tokens) {
+            $db->beginTransaction();
+            $stmt = $db->prepare('UPDATE orders SET user_id=?, guest_token=NULL WHERE user_id IS NULL AND guest_token=?');
+            foreach ($tokens as $token) { $stmt->execute([(int)$actor['id'], $token]); $claimed += $stmt->rowCount(); }
+            $db->commit();
+        }
+        respond(['claimed'=>$claimed]);
+    }
+
     if ($method === 'POST' && $route === 'orders') {
         $items=$data['items']??[]; if(!is_array($items)||count($items)<1) respond(['error'=>'订单不能为空'],422);
-        $actor=principal($config['jwt_secret']); $userId=($actor['role']??'')==='user'?(int)$actor['id']:null; $guest=$userId?null:(string)($data['guest_token']??bin2hex(random_bytes(24)));
+        $actor=principal($config['jwt_secret']); $userId=($actor['role']??'')==='user'?(int)$actor['id']:null; $guestInput=trim((string)($data['guest_token']??'')); $guest=$userId?null:($guestInput!==''?$guestInput:bin2hex(random_bytes(24)));
         $db->beginTransaction(); $resolved=[]; $total=0.0;
         foreach($items as $item){$stmt=$db->prepare("SELECT * FROM products WHERE id=? AND status='on_sale'");$stmt->execute([(int)($item['product_id']??0)]);$product=$stmt->fetch();$qty=max(1,min(99,(int)($item['quantity']??1)));if(!$product||$product['stock']<$qty)throw new RuntimeException('商品不存在或库存不足');$resolved[]=[$product,$qty];$total+=(float)$product['price']*$qty;}
-        $orderNo='LS'.date('YmdHis').random_int(100,999);$stmt=$db->prepare('INSERT INTO orders(order_no,user_id,guest_token,total_amount,contact_name,contact_phone,remark) VALUES(?,?,?,?,?,?,?)');$stmt->execute([$orderNo,$userId,$guest,number_format($total,2,'.',''),mb_substr((string)($data['contact_name']??''),0,80),mb_substr((string)($data['contact_phone']??''),0,40),mb_substr((string)($data['remark']??''),0,500)]);$orderId=(int)$db->lastInsertId();
+        $paymentStmt=$db->prepare('SELECT * FROM payment_methods WHERE id=? AND state=1');$paymentStmt->execute([(int)($data['payment_method_id']??0)]);$payment=$paymentStmt->fetch();if(!$payment){$db->rollBack();respond(['error'=>'请选择有效的支付方式'],422);}if($total<(float)$payment['minmoney']||$total>(float)$payment['maxmoney']){$db->rollBack();respond(['error'=>'订单金额不在该支付方式允许范围内'],422);}$paymentPublic=paymentMethodPublicRow($payment);$paymentSnapshot=json_encode($paymentPublic,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES);
+        $orderNo='LS'.date('YmdHis').random_int(100,999);$stmt=$db->prepare('INSERT INTO orders(order_no,user_id,guest_token,total_amount,payment_method_id,payment_code,payment_name,payment_snapshot,payment_status,contact_name,contact_phone,shipping_address,remark) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)');$stmt->execute([$orderNo,$userId,$guest,number_format($total,2,'.',''),$paymentPublic['id'],$paymentPublic['paytype'],$paymentPublic['paytypetitle'],$paymentSnapshot,'unpaid',mb_substr((string)($data['contact_name']??''),0,80),mb_substr((string)($data['contact_phone']??''),0,40),mb_substr((string)($data['shipping_address']??''),0,300),mb_substr((string)($data['remark']??''),0,500)]);$orderId=(int)$db->lastInsertId();
         foreach($resolved as [$product,$qty]){$db->prepare('INSERT INTO order_items(order_id,product_id,product_name,unit_price,quantity) VALUES(?,?,?,?,?)')->execute([$orderId,$product['id'],$product['name'],$product['price'],$qty]);$db->prepare('UPDATE products SET stock=stock-?,sales=sales+? WHERE id=? AND stock>=?')->execute([$qty,$qty,$product['id'],$qty]);}
-        $db->commit(); respond(['order_no'=>$orderNo,'guest_token'=>$guest,'total_amount'=>number_format($total,2,'.',''),'status'=>'pending'],201);
+        $db->commit(); respond(['id'=>$orderId,'order_no'=>$orderNo,'guest_token'=>$guest,'total_amount'=>number_format($total,2,'.',''),'status'=>'pending','payment_status'=>'unpaid','payment'=>$paymentPublic],201);
     }
     if ($method === 'GET' && $route === 'orders') {
         $actor=requireRole('user',$config['jwt_secret']);$stmt=$db->prepare('SELECT * FROM orders WHERE user_id=? ORDER BY id DESC');$stmt->execute([(int)$actor['id']]);respond($stmt->fetchAll());
     }
+    if ($method === 'POST' && preg_match('#^orders/(\d+)/payment-submitted$#',$route,$match)) {
+        $stmt=$db->prepare('SELECT * FROM orders WHERE id=?');$stmt->execute([(int)$match[1]]);$order=$stmt->fetch();if(!$order)respond(['error'=>'订单不存在'],404);$actor=principal($config['jwt_secret']);$owned=($actor['role']??'')==='user'&&(int)$order['user_id']===(int)$actor['id'];$guestOwned=$order['user_id']===null&&$order['guest_token']!==null&&hash_equals((string)$order['guest_token'],(string)($data['guest_token']??''));if(!$owned&&!$guestOwned)respond(['error'=>'unauthorized'],401);if($order['status']!=='pending')respond(['error'=>'当前订单状态无法提交付款'],409);$reference=mb_substr(trim((string)($data['payment_reference']??'')),0,120);$db->prepare("UPDATE orders SET payment_status='submitted',payment_reference=?,payment_submitted_at=CURRENT_TIMESTAMP WHERE id=?")->execute([$reference,(int)$match[1]]);respond(['ok'=>true,'payment_status'=>'submitted']);
+    }
 
     if ($method === 'POST' && $route === 'chat/session') {
-        $actor=principal($config['jwt_secret']);$userId=($actor['role']??'')==='user'?(int)$actor['id']:null;$name=trim((string)($data['visitor_name']??'游客'));if($name==='')$name='游客';$token=bin2hex(random_bytes(32));
+        $actor=principal($config['jwt_secret']);$userId=null;$name='';
+        if (($actor['role']??'')==='user') {
+            $userId=(int)($actor['id']??0);
+            $userStmt=$db->prepare('SELECT username FROM users WHERE id=? AND status=\'active\'');$userStmt->execute([$userId]);
+            $name=(string)($userStmt->fetchColumn()?:'');
+            if ($name==='') {$userId=null;}
+        }
+        if ($userId===null) $name='游客-'.strtoupper(substr(bin2hex(random_bytes(4)),0,6));
+        $token=bin2hex(random_bytes(32));
         $db->prepare('INSERT INTO chat_sessions(token,user_id,visitor_name) VALUES(?,?,?)')->execute([$token,$userId,mb_substr($name,0,64)]);$id=(int)$db->lastInsertId();$db->prepare('INSERT INTO chat_messages(session_id,sender,content) VALUES(?,?,?)')->execute([$id,'system','您好，欢迎咨询！']);respond(['token'=>$token,'session_id'=>$id],201);
     }
     if (preg_match('#^chat/messages/([a-f0-9]{64})$#',$route,$match)) {
@@ -223,7 +272,7 @@ try {
         $stmt=$db->prepare('SELECT id,product_id,product_name,unit_price,quantity FROM order_items WHERE order_id=? ORDER BY id');$stmt->execute([(int)$match[1]]);$order['items']=$stmt->fetchAll();respond($order);
     }
     if (($method==='PUT' || $method==='POST') && preg_match('#^admin/orders/(\d+)/status$#',$route,$match)) {
-        $allowed=['pending'=>['paid','cancelled'],'paid'=>['delivering','refunded'],'delivering'=>['completed','refunded'],'completed'=>[],'cancelled'=>[],'refunded'=>[]];$stmt=$db->prepare('SELECT status FROM orders WHERE id=?');$stmt->execute([(int)$match[1]]);$order=$stmt->fetch();$next=(string)($data['status']??'');if(!$order||!in_array($next,$allowed[$order['status']]??[],true))respond(['error'=>'非法订单状态转换'],409);$db->prepare('UPDATE orders SET status=? WHERE id=?')->execute([$next,(int)$match[1]]);respond(['ok'=>true]);
+        $allowed=['pending'=>['paid','cancelled'],'paid'=>['delivering','refunded'],'delivering'=>['completed','refunded'],'completed'=>[],'cancelled'=>[],'refunded'=>[]];$stmt=$db->prepare('SELECT status FROM orders WHERE id=?');$stmt->execute([(int)$match[1]]);$order=$stmt->fetch();$next=(string)($data['status']??'');if(!$order||!in_array($next,$allowed[$order['status']]??[],true))respond(['error'=>'非法订单状态转换'],409);$paymentStatus=$next==='paid'?'confirmed':(in_array($next,['cancelled','refunded'],true)?'failed':null);if($paymentStatus){$db->prepare('UPDATE orders SET status=?,payment_status=? WHERE id=?')->execute([$next,$paymentStatus,(int)$match[1]]);}else{$db->prepare('UPDATE orders SET status=? WHERE id=?')->execute([$next,(int)$match[1]]);}respond(['ok'=>true]);
     }
     if ($method==='GET' && $route==='admin/chats') respond($db->query("SELECT s.*,COALESCE((SELECT m.content FROM chat_messages m WHERE m.session_id=s.id ORDER BY m.id DESC LIMIT 1),'') AS latest_message,COALESCE((SELECT m.sender FROM chat_messages m WHERE m.session_id=s.id ORDER BY m.id DESC LIMIT 1),'') AS latest_sender,(SELECT COUNT(*) FROM chat_messages m WHERE m.session_id=s.id AND m.sender='visitor' AND m.id>s.admin_last_read_message_id) AS unread_count FROM chat_sessions s ORDER BY s.last_message_at DESC,s.id DESC")->fetchAll());
     if (preg_match('#^admin/chats/(\d+)/messages$#',$route,$match)) {
