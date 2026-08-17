@@ -1,0 +1,28 @@
+# Local/editor files
+.ssh/
+.git/
+**/node_modules/
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+
+# Runtime data and logs
+database/*.sqlite
+database/*.sqlite-*
+*.log
+
+# Frontend build output
+app/web/dist/
+app/admin/dist/
+public/assets/
+public/admin/assets/
+
+# Bundled/local toolchains and generated caches
+packages/
+shopxo/
+shopxo/vendor/
+shopxo/runtime/*
+shopxo/public/static/upload/*
+shopxo/extend/qrcode/cache/*

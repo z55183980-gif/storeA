@@ -1,0 +1,2 @@
+{"name":"lightweight-store-admin","private":true,"type":"module","scripts":{"build":"vite build"},"dependencies":{"@vitejs/plugin-vue":"latest","vite":"latest","vue":"latest"},"devDependencies":{}}
+
