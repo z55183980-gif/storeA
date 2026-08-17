@@ -15,6 +15,10 @@ body{font-family:Arial,"Microsoft YaHei";margin:0;background:#f6f8fc;color:#1720
 .product-image img{display:block;width:100%;height:100%;object-fit:contain;border-radius:8px;font-size:0;color:transparent}
 .product-link{cursor:pointer}
 .product-link:hover{color:#315efb}
+.product-description{margin:6px 0;line-height:1.55;color:#5f6f86}
+.product-description-text{display:-webkit-box;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:5;line-clamp:5}
+.product-description a{display:inline-block;margin-top:4px;color:#315efb;text-decoration:none;font-size:13px;font-weight:600;cursor:pointer}
+.product-description a:hover{text-decoration:underline}
 .buy-button{background:#315efb;color:#fff}
 .cart-button{background:#fff;color:#315efb;border:1px solid #315efb}
 .cart-button:hover{background:#eef2ff}
@@ -149,6 +153,10 @@ button,input{font:inherit}
     margin:0 auto;
     padding:0 0 36px;
     background:#eef2f7;
+    border:1px solid #dbe3ee;
+    border-radius:18px;
+    box-shadow:0 18px 54px #1f35521f;
+    overflow:hidden;
   }
   .product-detail-screen>*{max-width:none;margin-left:0;margin-right:0}
   .detail-topbar{
@@ -204,9 +212,10 @@ button,input{font:inherit}
  .hero{padding:28px 10%}.hero main{margin:0 auto}.hero-brand{display:flex;align-items:center;gap:12px;margin-bottom:10px}.hero-brand img{width:42px;height:42px;border-radius:12px;object-fit:cover}.hero-brand strong{font-size:30px;line-height:1.2}.hero p{margin:0;font-size:15px}
 @media(max-width:640px){.hero{padding:24px 20px}.hero-brand img{width:36px;height:36px;border-radius:10px}.hero-brand strong{font-size:24px}.hero p{font-size:13px}}
 
-/* Give the mobile detail view a little more room for the product image. */
+/* Keep the mobile gallery proportional to its width. Viewport-height sizing
+   made tall phones leave excessive blank space above and below wide images. */
 @media (max-width:760px){
-  .detail-gallery .product-image{height:min(60vh,600px)}
+  .detail-gallery .product-image{height:clamp(260px,75vw,360px)}
 }
  .category-nav{display:flex;justify-content:flex-start;gap:8px;flex-wrap:wrap;max-width:1100px;margin:0 auto;padding:14px 20px 2px;background:#f6f8fc}
  .category-nav button{background:#fff;color:#53647d;border:1px solid #e2e8f2;border-radius:20px;padding:9px 17px;font-size:13px;cursor:pointer}
