@@ -1,2 +1,1 @@
-{"name":"lightweight-store-web","private":true,"type":"module","scripts":{"build":"vite build"},"dependencies":{"@vitejs/plugin-vue":"latest","vite":"latest","vue":"latest"},"devDependencies":{}}
-
+{"name":"lightweight-store-web","private":true,"type":"module","scripts":{"build":"vite build"},"dependencies":{"@vitejs/plugin-vue":"latest","qrcode.vue":"3.6.0","vite":"latest","vue":"latest"}}
