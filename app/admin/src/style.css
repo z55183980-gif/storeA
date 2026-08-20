@@ -56,3 +56,10 @@ body{background:var(--canvas);color:var(--ink);font-family:Inter,"PingFang SC","
 .service-main{height:100dvh}
 .service-queue,.conversation-panel{min-height:0}
 @media(min-width:761px){.service-workspace{grid-template-rows:minmax(0,1fr)}}
+.service-workspace{grid-template-columns:320px minmax(0,1fr)}
+.service-workspace{grid-template-rows:auto minmax(0,1fr)}
+.service-workspace>.service-queue,.service-workspace>.conversation-panel,.service-workspace>.conversation-empty{grid-row:2}
+.chat-presets-panel{grid-column:1 / -1;max-height:190px;overflow:auto;padding:16px 18px;border:0;border-bottom:1px solid var(--line);border-radius:0;box-shadow:none}
+.chat-presets-panel .panel-toolbar{margin:0 0 10px}
+.preset-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:9px 0;border-top:1px solid #edf1f6}
+.preset-row strong,.preset-row p{display:block;margin:0}.preset-row p{margin-top:4px;color:#8190a4;font-size:12px}.preset-row .danger,.preset-row .action{margin-left:6px}
