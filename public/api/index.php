@@ -17,6 +17,7 @@ try {
     $db->exec('PRAGMA foreign_keys=ON');
     $db->exec('PRAGMA busy_timeout=5000');
     $db->exec('CREATE TABLE IF NOT EXISTS captcha_challenges (id TEXT PRIMARY KEY, answer_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)');
+    $db->exec("CREATE TABLE IF NOT EXISTS chat_presets (id INTEGER PRIMARY KEY AUTOINCREMENT, question TEXT NOT NULL UNIQUE, answer TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)");
     $db->exec("CREATE TABLE IF NOT EXISTS payment_methods (id INTEGER PRIMARY KEY AUTOINCREMENT, paytype TEXT UNIQUE NOT NULL, paytypetitle TEXT NOT NULL, ftitle TEXT NOT NULL DEFAULT '', minmoney NUMERIC NOT NULL DEFAULT 100 CHECK(minmoney>=0), maxmoney NUMERIC NOT NULL DEFAULT 50000 CHECK(maxmoney>=minmoney), isonline INTEGER NOT NULL DEFAULT 0 CHECK(isonline IN (0,1)), state INTEGER NOT NULL DEFAULT 1 CHECK(state IN (0,1)), configs TEXT NOT NULL DEFAULT '{}', remark TEXT NOT NULL DEFAULT '', listorder INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)");
     $columns=$db->query('PRAGMA table_info(products)')->fetchAll(PDO::FETCH_COLUMN,1);
     if (!in_array('original_price',$columns,true)) $db->exec('ALTER TABLE products ADD COLUMN original_price NUMERIC NULL');
@@ -143,6 +144,7 @@ try {
         $category=(int)($_GET['category_id']??0);$sql="SELECT p.*,c.name AS category_name FROM products p LEFT JOIN categories c ON c.id=p.category_id WHERE p.status='on_sale'";if($category>0)$sql.=' AND p.category_id='.$category;respond($db->query($sql.' ORDER BY p.sort_order,p.id')->fetchAll());
     }
     if ($method === 'GET' && $route === 'categories') respond($db->query("SELECT c.*,COUNT(p.id) AS product_count FROM categories c LEFT JOIN products p ON p.category_id=c.id AND p.status='on_sale' GROUP BY c.id ORDER BY c.sort_order,c.id")->fetchAll());
+    if ($method === 'GET' && $route === 'chat-presets') respond($db->query('SELECT id,question,answer,sort_order FROM chat_presets ORDER BY sort_order,id')->fetchAll());
     if ($method === 'GET' && $route === 'payment-methods') {
         respond(array_map('paymentMethodPublicRow',$db->query('SELECT * FROM payment_methods WHERE state=1 ORDER BY listorder,id')->fetchAll()));
     }
@@ -224,7 +226,7 @@ try {
     if (preg_match('#^chat/messages/([a-f0-9]{64})$#',$route,$match)) {
         $stmt=$db->prepare('SELECT id,status FROM chat_sessions WHERE token=?');$stmt->execute([$match[1]]);$session=$stmt->fetch();if(!$session)respond(['error'=>'会话不存在'],404);
         if($method==='GET'){$stmt=$db->prepare('SELECT id,sender,content,created_at FROM chat_messages WHERE session_id=? ORDER BY id');$stmt->execute([$session['id']]);respond($stmt->fetchAll());}
-        if($method==='POST'){if($session['status']!=='open')respond(['error'=>'会话已关闭'],409);$content=requireText($data,'content',1,2000);$db->prepare('INSERT INTO chat_messages(session_id,sender,content) VALUES(?,?,?)')->execute([$session['id'],'visitor',$content]);$db->prepare('UPDATE chat_sessions SET last_message_at=CURRENT_TIMESTAMP WHERE id=?')->execute([$session['id']]);respond(['ok'=>true],201);}
+        if($method==='POST'){if($session['status']!=='open')respond(['error'=>'会话已关闭'],409);$content=requireText($data,'content',1,2000);$db->prepare('INSERT INTO chat_messages(session_id,sender,content) VALUES(?,?,?)')->execute([$session['id'],'visitor',$content]);$preset=$db->prepare('SELECT answer FROM chat_presets WHERE question=?');$preset->execute([$content]);$answer=$preset->fetchColumn();if($answer!==false)$db->prepare('INSERT INTO chat_messages(session_id,sender,content) VALUES(?,?,?)')->execute([$session['id'],'agent',$answer]);$db->prepare('UPDATE chat_sessions SET last_message_at=CURRENT_TIMESTAMP WHERE id=?')->execute([$session['id']]);respond(['ok'=>true],201);}
     }
 
     if (str_starts_with($route,'admin/')) requireRole('admin',$config['jwt_secret']);
@@ -284,6 +286,9 @@ try {
         $allowed=['pending'=>['paid','cancelled'],'paid'=>['delivering','refunded'],'delivering'=>['completed','refunded'],'completed'=>[],'cancelled'=>[],'refunded'=>[]];$stmt=$db->prepare('SELECT status FROM orders WHERE id=?');$stmt->execute([(int)$match[1]]);$order=$stmt->fetch();$next=(string)($data['status']??'');if(!$order||!in_array($next,$allowed[$order['status']]??[],true))respond(['error'=>'非法订单状态转换'],409);$paymentStatus=$next==='paid'?'confirmed':(in_array($next,['cancelled','refunded'],true)?'failed':null);if($paymentStatus){$db->prepare('UPDATE orders SET status=?,payment_status=? WHERE id=?')->execute([$next,$paymentStatus,(int)$match[1]]);}else{$db->prepare('UPDATE orders SET status=? WHERE id=?')->execute([$next,(int)$match[1]]);}respond(['ok'=>true]);
     }
     if ($method==='GET' && $route==='admin/chats') respond($db->query("SELECT s.*,COALESCE((SELECT m.content FROM chat_messages m WHERE m.session_id=s.id ORDER BY m.id DESC LIMIT 1),'') AS latest_message,COALESCE((SELECT m.sender FROM chat_messages m WHERE m.session_id=s.id ORDER BY m.id DESC LIMIT 1),'') AS latest_sender,(SELECT COUNT(*) FROM chat_messages m WHERE m.session_id=s.id AND m.sender='visitor' AND m.id>s.admin_last_read_message_id) AS unread_count FROM chat_sessions s ORDER BY s.last_message_at DESC,s.id DESC")->fetchAll());
+    if ($method==='GET' && $route==='admin/chat-presets') respond($db->query('SELECT id,question,answer,sort_order FROM chat_presets ORDER BY sort_order,id')->fetchAll());
+    if ($method==='POST' && $route==='admin/chat-presets') { $q=requireText($data,'question',1,120);$a=requireText($data,'answer',1,2000);$id=(int)($data['id']??0);if($id){$s=$db->prepare('UPDATE chat_presets SET question=?,answer=?,sort_order=?,updated_at=CURRENT_TIMESTAMP WHERE id=?');$s->execute([$q,$a,(int)($data['sort_order']??0),$id]);}else{$s=$db->prepare('INSERT INTO chat_presets(question,answer,sort_order) VALUES(?,?,?)');$s->execute([$q,$a,(int)($data['sort_order']??0)]);$id=(int)$db->lastInsertId();}respond(['id'=>$id]); }
+    if ($method==='POST' && preg_match('#^admin/chat-presets/(\d+)/delete$#',$route,$match)) { $db->prepare('DELETE FROM chat_presets WHERE id=?')->execute([(int)$match[1]]);respond(['ok'=>true]); }
     if (preg_match('#^admin/chats/(\d+)/messages$#',$route,$match)) {
         $stmt=$db->prepare('SELECT id,status FROM chat_sessions WHERE id=?');$stmt->execute([(int)$match[1]]);$session=$stmt->fetch();if(!$session)respond(['error'=>'会话不存在'],404);
         if($method==='GET'){$stmt=$db->prepare('SELECT id,sender,content,created_at FROM chat_messages WHERE session_id=? ORDER BY id');$stmt->execute([$session['id']]);respond($stmt->fetchAll());}
